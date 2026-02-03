@@ -1,49 +1,120 @@
-from private_notes import PrivNotes
-import cryptography
+from cryptography.hazmat.primitives.asymmetric import ec
 
-import re
+from messenger import MessengerServer
+from messenger import MessengerClient
 
 def error(s):
-  print('=== ERROR: %s' % s)
+  print("=== ERROR: " + s)
 
-print('Initializing notes')
-priv_notes = PrivNotes('123456')
+print("Initializing Server")
+server_sign_sk = ec.generate_private_key(ec.SECP256R1())
+server_enc_sk = ec.generate_private_key(ec.SECP256R1())
+server = MessengerServer(server_sign_sk, server_enc_sk)
 
-print('Adding notes')
-kvs = { 'Groceries': 'lettuce\nbread\nchocolate',
-        'Idea': 'We will take a forklift to the moon!',
-        'Secrets': 'The secret word is bananas.'}
-for title in kvs:
-  priv_notes.set(title, kvs[title])
+server_sign_pk = server_sign_sk.public_key()
+server_enc_pk = server_enc_sk.public_key()
 
-print('Trying to fetch notes')
-for title in kvs:
-  note = priv_notes.get(title)
-  if note != kvs[title]:
-    error('get failed for title %s (expected %s, received %s)' % (title, kvs[title], note))
-note = priv_notes.get('non-existent')
-if note is not None:
-  error('get failed for title non-existent (expected None, received %s)' % note)
+print("Initializing Users")
+alice = MessengerClient("alice", server_sign_pk, server_enc_pk)
+bob = MessengerClient("bob", server_sign_pk, server_enc_pk)
+carol = MessengerClient("carol", server_sign_pk, server_enc_pk)
 
-print('Trying to remove notes')
-if not priv_notes.remove('Groceries'):
-  error('remove failed for title Groceries')
-note = priv_notes.get('Groceries')
-if note is not None:
-  error('get failed for title Groceries (expected None, received %s)' % note)
-if priv_notes.remove('non-existent'):
-  error('remove failed for title non-existent')
+print("Generating Certs")
+certA = alice.generateCertificate()
+certB = bob.generateCertificate()
+certC = carol.generateCertificate()
 
-print('Serializing notes')
-data, checksum = priv_notes.dump()
+print("Signing Certs")
+sigA = server.signCert(certA)
+sigB = server.signCert(certB)
+sigC = server.signCert(certC)
 
-print('Loading notes')
-new_notes_instance = PrivNotes('123456', data, checksum)
-new_notes_instance.dump()
-for title in kvs:
-  note1 = priv_notes.get(title)
-  note2 = new_notes_instance.get(title)
-  if note1 != note2:
-    error('get mismatch for title %s (received values %s and %s)' % (title, note1, note2))
+print("Distributing Certs")
+try:
+    alice.receiveCertificate(certB, sigB)
+    alice.receiveCertificate(certC, sigC)
+    bob.receiveCertificate(certA, sigA)
+    bob.receiveCertificate(certC, sigC)
+    carol.receiveCertificate(certA, sigA)
+    carol.receiveCertificate(certB, sigB)
+except:
+    error("certificate verification issue")
 
-print('Testing complete')
+print("Testing incorrect cert issuance")
+mallory = MessengerClient("mallory", server_sign_pk, server_enc_pk)
+certM = mallory.generateCertificate()
+try:
+    alice.receiveCertificate(certM, sigC)
+except:
+    print("successfully detected bad signature!")
+else:
+    error("accepted certificate with incorrect signature")
+
+print("Testing Reporting")
+content = "inappropriate message contents"
+reportPT, reportCT = alice.report("Bob", content)
+decryptedReport = server.decryptReport(reportCT)
+if decryptedReport != reportPT:
+    error("report did not decrypt properly")
+    print(reportPT)
+    print(decryptedReport)
+else:
+    print("Reporting test successful!")
+
+print("Testing a conversation")
+header, ct = alice.sendMessage("bob", "Hi Bob!")
+print(header, "\n", ct)
+msg = bob.receiveMessage("alice", header, ct)
+if msg != "Hi Bob!":
+    error("message 1 was not decrypted correctly")
+
+header, ct = alice.sendMessage("bob", "Hi again Bob!")
+msg = bob.receiveMessage("alice", header, ct)
+print(header, "\n", ct)
+if msg != "Hi again Bob!":
+    error("message 2  was not decrypted correctly")
+
+header, ct = bob.sendMessage("alice", "Hey Alice!")
+msg = alice.receiveMessage("bob", header, ct)
+if msg != "Hey Alice!":
+    error("message 3 was not decrypted correctly")
+print(header, "\n", ct)
+
+header, ct = bob.sendMessage("alice", "Can't talk now")
+print(header, "\n", ct)
+msg = alice.receiveMessage("bob", header, ct)
+if msg != "Can't talk now":
+    error("message 4 was not decrypted correctly")
+
+header, ct = bob.sendMessage("alice", "Started the homework too late :(")
+print(header, "\n", ct)
+msg = alice.receiveMessage("bob", header, ct)
+if msg != "Started the homework too late :(":
+    error("message 5 was not decrypted correctly")
+
+header, ct = alice.sendMessage("bob", "Ok, bye Bob!")
+print(header, "\n", ct)
+msg = bob.receiveMessage("alice", header, ct)
+if msg != "Ok, bye Bob!":
+    error("message 6  was not decrypted correctly")
+
+header, ct = bob.sendMessage("alice", "I'll remember to start early next time!")
+print(header, "\n", ct)
+msg = alice.receiveMessage("bob", header, ct)
+if msg != "I'll remember to start early next time!":
+    error("message 7 was not decrypted correctly")
+
+print("conversation completed!")
+
+
+print("Testing handling an incorrect message")
+
+h, c = alice.sendMessage("bob", "malformed message test")
+m = bob.receiveMessage("alice", h, ct)
+if m != None:
+    error("didn't reject incorrect message")
+else:
+    print("success!")
+
+
+print("Testing complete")
